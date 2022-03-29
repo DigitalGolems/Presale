@@ -3,17 +3,20 @@
 pragma experimental ABIEncoderV2;
 pragma solidity ^0.8.10;
 
-import "../DigitalGolems/DigitalGolems.sol";
+import "@openzeppelin/contracts/utils/Counters.sol";
+import "../DigitalGolems/Interfaces/IDigitalGolems.sol";
 import "../Utils/Owner.sol";
 import "../Utils/ControlledAccess.sol";
-
+import "../Utils/SafeMath.sol";
 
 contract PresaleDIG is Owner, ControlledAccess  {
 
     using SafeMath for uint256;
-   
-    DigitalGolems private DIG;
-        
+
+    using Counters for Counters.Counter;
+    Counters.Counter private _presaleGolemsAmount;
+    IDigitalGolems private DIG;
+
     uint public startTimeRound1;
     uint public endTimeRound1;
     uint public priceRound1;
@@ -41,9 +44,16 @@ contract PresaleDIG is Owner, ControlledAccess  {
     event ChangeRoundTime(bool isStartTime,uint256 _lastTime, uint256 _newTime, uint8 _round);
     event WithdrawBNB(uint256 _amount);
 
+    struct Golem {
+        uint8 series;
+        string uri;
+        bool sold;
+    }
+    mapping (uint16 => Golem) golems;
+
     constructor(
         address token_,
-        uint256[] memory startTime_, 
+        uint256[] memory startTime_,
         uint256[] memory endTime_,
         address wallet_,
         uint256[] memory price_,
@@ -52,7 +62,7 @@ contract PresaleDIG is Owner, ControlledAccess  {
     {
         require(token_ != address(0), "Token is not address(0)");
         require(startTime_.length == 3);
-        require(endTime_.length == 3);        
+        require(endTime_.length == 3);
         require(price_.length == 3);
         require(tokenAmount_.length == 3);
         for (uint8 i = 0; i < 3; i++) {
@@ -66,7 +76,7 @@ contract PresaleDIG is Owner, ControlledAccess  {
             require(tokenAmount_[i] > 0, "Amount can't be less than 0");
         }
         require(wallet_ != address(0), "Wallet is not address(0)");
-        DIG = DigitalGolems(token_);
+        DIG = IDigitalGolems(token_);
         startTimeRound1 = startTime_[0];
         endTimeRound1 = endTime_[0];
         startTimeRound2 = startTime_[1];
@@ -80,6 +90,32 @@ contract PresaleDIG is Owner, ControlledAccess  {
         amountToBuyRound2 = tokenAmount_[1];
         amountToBuyRound3 = tokenAmount_[2];
         wallet = payable(wallet_);
+    }
+
+    function getDIG() public view returns(address) {
+        return address(DIG);
+    }
+
+    function addGolems(Golem[] memory _golems) public isOwner {
+        for (uint256 i = 0; i < _golems.length; i++) {
+            uint256 current = _presaleGolemsAmount.current();
+            golems[uint16(current)] = _golems[i];
+            _presaleGolemsAmount.increment();
+        }
+    }
+
+    function addGolem(Golem memory _golem) public isOwner {
+        uint current = _presaleGolemsAmount.current();
+        golems[uint16(current)] = _golem;
+        _presaleGolemsAmount.increment();
+    }
+
+    function getGolems() public view isOwner returns(Golem[] memory){
+        Golem[] memory result = new Golem[](_presaleGolemsAmount.current());
+        for (uint16 i = 0; i < result.length; i++) {
+            result[i] = golems[i];
+        }
+        return result;
     }
 
     modifier onlyWhileOpenRound1() {
@@ -103,35 +139,46 @@ contract PresaleDIG is Owner, ControlledAccess  {
     fallback() external payable{}
     receive() external payable{}
 
+    function returnVALUE() public payable returns(uint8) {
+        return uint8(msg.value / priceRound1);
+    }
+
     function buyDIGRound1(
-        string[] memory tokenURIs, 
         uint8 _v,
-        bytes32[] memory rs,
-        uint8[][] memory kindSeries
-    ) 
-        public 
-        payable 
-        onlyValidMint(_v, rs[0], rs[1], tokenURIs[0], msg.sender) 
+        bytes32 _r,
+        bytes32 _s
+    )
+        public
+        payable
+        onlyValidAccess(_v, _r, _s)
         onlyWhileOpenRound1
     {
-        require(tokenSold < amountToBuyRound1);
-        require(msg.value >= priceRound1 * tokenURIs.length);
-        uint256 _amount = tokenURIs.length;
+        require(tokenSold < amountToBuyRound1, "All tokens sold");
+        require(msg.value >= priceRound1, "Value too low");
+        uint8 _amount = uint8(msg.value / priceRound1);
+        (bool sent, ) = wallet.call{value: msg.value}("");
+        require(sent, "Error with sending");
         for (uint8 i = 0; i < _amount; i++) {
+            uint16 _toMint = getGolem();
             DIG.mintPresale(
-                msg.sender, 
-                tokenURIs[i],
-                kindSeries[0][i],
-                kindSeries[1][i]
+                msg.sender
             );
+            golems[_toMint].sold = true;
         }
         tokenSold = tokenSold.add(_amount);
-        wallet.transfer(msg.value);
         emit WithdrawBNB(msg.value);
         emit TransferPresaleToken(msg.sender, _amount);
-        return;
     }
-    
+
+    function getGolem() private view returns(uint16) {
+        for (uint16 i = 0; i < _presaleGolemsAmount.current(); i++) {
+            if (golems[i].sold == false) {
+                return i;
+            } else {
+                return 64000;
+            }
+        }
+    }
 
     // function buyDBTRound2(uint _amount) public payable {
     //     require(round2End == false, "Second round ends");
@@ -204,7 +251,7 @@ contract PresaleDIG is Owner, ControlledAccess  {
         startTimeRound1 = _time;
     }
 
-    //ONLY FOR TESTING  
+    //ONLY FOR TESTING
     function mockRound1EndTime(uint256 _time) external isOwner {
         endTimeRound1 = _time;
     }
@@ -214,7 +261,7 @@ contract PresaleDIG is Owner, ControlledAccess  {
         startTimeRound2 = _time;
     }
 
-    //ONLY FOR TESTING  
+    //ONLY FOR TESTING
     function mockRound2EndTime(uint256 _time) external isOwner {
         endTimeRound2 = _time;
     }
@@ -224,7 +271,7 @@ contract PresaleDIG is Owner, ControlledAccess  {
         startTimeRound3 = _time;
     }
 
-    //ONLY FOR TESTING  
+    //ONLY FOR TESTING
     function mockRound3EndTime(uint256 _time) external isOwner {
         endTimeRound3 = _time;
     }
@@ -257,7 +304,7 @@ contract PresaleDIG is Owner, ControlledAccess  {
     }
 
     function changeTokenAddress(address _new) external isOwner {
-        DIG = DigitalGolems(_new);
+        DIG = IDigitalGolems(_new);
     }
 
     function changePriceRound1(uint256 _price) external isOwner {
